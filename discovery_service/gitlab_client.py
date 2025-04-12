@@ -50,4 +50,23 @@ def get_all_projects(max_pages=None):
             break # Last page reached
 
     logger.info(f"Finished fetching. Total projects retrieved: {len(projects)}")
-    return projects 
+    return projects
+
+def get_project_branch(project_id, branch_name):
+    """Fetches details for a specific branch within a project."""
+    api_url = urljoin(config.GITLAB_URL, f"/api/v4/projects/{project_id}/repository/branches/{branch_name}")
+    headers = {"PRIVATE-TOKEN": config.GITLAB_PRIVATE_TOKEN}
+    try:
+        # logger.debug(f"Fetching branch '{branch_name}' for project {project_id} from {config.GITLAB_URL}")
+        response = requests.get(api_url, headers=headers, timeout=15)
+        if response.status_code == 404:
+            # logger.debug(f"Branch '{branch_name}' not found for project {project_id}.")
+            return None # Branch doesn't exist
+        response.raise_for_status() # Raise an exception for other bad status codes
+        branch_data = response.json()
+        # logger.debug(f"Successfully fetched branch '{branch_name}' for project {project_id}.")
+        return branch_data
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching branch '{branch_name}' for project {project_id}: {e}")
+        # Decide how to handle: return None, raise exception, etc.
+        return None # Return None on error for now 

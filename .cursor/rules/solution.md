@@ -1,4 +1,4 @@
-This is a detailed description of what tis project is all about.
+This is a detailed description of what this project is all about.
 
 **Core Problem:** Efficiently extract all file content, line by line, from a large number of Git repositories via the GitLab API and index each line as a separate document (or structured data) in Elasticsearch. Handle initial bulk load and potential future updates.
 

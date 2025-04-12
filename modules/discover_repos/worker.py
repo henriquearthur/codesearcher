@@ -15,8 +15,8 @@ from kafka.errors import KafkaError
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from typing import List, Dict, Any, Optional, Union # Added typing imports
 
-from . import gitlab_client
-from . import config
+from ..common import gitlab_client # Updated import
+from ..common import config       # Updated import
 
 # Configure logging
 # Using a basic config here, but consider external configuration (e.g., file, dictConfig)
@@ -160,13 +160,25 @@ def main():
         logger.info("Kafka producer initialized successfully.")
 
         # Fetch Projects from GitLab
-        logger.info("Fetching projects from GitLab...")
+        if not config.GITLAB_GROUP_PATH:
+            logger.error("GITLAB_GROUP_PATH is not set in the configuration. Cannot filter by group.")
+            # Optionally, fall back to get_all_projects or raise an error
+            # projects = gitlab_client.get_all_projects(max_pages=None) 
+            # logger.warning("Falling back to fetching ALL accessible projects.")
+            return # Exit if group path is mandatory
+
+        logger.info(f"Fetching projects from GitLab group path '{config.GITLAB_GROUP_PATH}'...")
         # Use max_pages=N during testing to limit API calls
-        projects: List[Dict[str, Any]] = gitlab_client.get_all_projects(max_pages=None)
+        # Use the new function to get projects from the target group and its subgroups
+        projects: List[Dict[str, Any]] = gitlab_client.get_group_projects(
+            group_path=config.GITLAB_GROUP_PATH, # Use group path from config
+            include_subgroups=True,
+            max_pages=None # Set to a number during testing if needed
+        )
         # projects = projects[:10] # DEBUG: Limit projects for testing
 
         if not projects:
-            logger.warning("No projects retrieved from GitLab. Check token permissions, API URL, and network access.")
+            logger.warning(f"No projects retrieved from GitLab group path '{config.GITLAB_GROUP_PATH}'. Check group path, token permissions, API URL, and network access.")
             # Exit gracefully if no projects found
             return
 

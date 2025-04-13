@@ -33,8 +33,8 @@ def main():
     parser.add_argument(
         "-n", "--num-processes",
         type=int,
-        default=30,
-        help="Number of processes to spawn for 'process_repos' worker (default: 30)"
+        default=10,
+        help="Number of processes to spawn for 'process_repos' worker (default: 10)"
     )
 
     args = parser.parse_args()

@@ -261,64 +261,107 @@ def get_project_branch(project_id: int, branch_name: str) -> Optional[Dict[str, 
     return branch_data
 
 
-def get_repository_tree(project_id: int, ref: str) -> Iterator[Dict[str, Any]]:
+def get_repository_tree(project_id: int, ref: str, max_workers: int = 10) -> List[Dict[str, Any]]:
     """Fetches the repository tree (list of files and directories) recursively for a specific ref (commit SHA, branch, tag).
 
-    Uses pagination to handle potentially large trees.
+    Uses pagination and fetches pages concurrently after the first page.
 
     Args:
         project_id (int): The ID of the GitLab project.
         ref (str): The commit SHA, branch name, or tag name.
+        max_workers (int, optional): Maximum number of threads for concurrent page fetching. Defaults to 10.
 
-    Yields:
-        Iterator[Dict[str, Any]]: An iterator yielding dictionaries, each representing a file or directory entry.
-                                   Yields nothing if the tree is empty or an error occurs.
+    Returns:
+        List[Dict[str, Any]]: A list containing dictionaries, each representing a file or directory entry.
+                                Returns an empty list if the tree is empty or an error occurs.
     """
-    page = 1
+    tree_items: List[Dict[str, Any]] = []
     per_page = 100 # Max allowed by GitLab API v4
+    endpoint = f"/projects/{project_id}/repository/tree"
+    api_url = urljoin(config.GITLAB_URL, GITLAB_API_BASE + endpoint)
+    headers = {"PRIVATE-TOKEN": config.GITLAB_PRIVATE_TOKEN}
 
-    while True:
-        endpoint = f"/projects/{project_id}/repository/tree"
-        params = {
-            "ref": ref,
-            "recursive": "true",
-            "per_page": per_page,
-            "page": page
-        }
-        logger.info(f"Fetching repository tree page {page} for project {project_id}, ref {ref}")
+    # --- Fetch First Page and Total Pages ---
+    logger.info(f"Fetching initial repository tree page for project {project_id}, ref {ref} to determine total pages...")
+    initial_params = {
+        "ref": ref,
+        "recursive": "true",
+        "per_page": per_page,
+        "page": 1
+    }
 
-        # We need the full response object here to check headers, so call requests directly
-        api_url = urljoin(config.GITLAB_URL, GITLAB_API_BASE + endpoint)
-        headers = {"PRIVATE-TOKEN": config.GITLAB_PRIVATE_TOKEN}
-        try:
-            response = requests.get(api_url, headers=headers, params=params, timeout=60) # Increased timeout for potentially large trees
+    try:
+        response = requests.get(api_url, headers=headers, params=initial_params, timeout=60)
 
-            # Check for 404 specifically (repo or ref might not exist)
-            if response.status_code == 404:
-                logger.warning(f"Repository tree not found (404) for project {project_id}, ref {ref}. Might be an empty repo or invalid ref.")
-                break # Stop pagination
+        # Handle 404 specifically (repo or ref might not exist)
+        if response.status_code == 404:
+            logger.warning(f"Repository tree not found (404) for project {project_id}, ref {ref}. Might be an empty repo or invalid ref.")
+            return [] # Return empty list
 
-            response.raise_for_status() # Raise HTTPError for other bad status codes
+        response.raise_for_status() # Raise HTTPError for other bad status codes
+        initial_tree_items = response.json()
+        tree_items.extend(initial_tree_items)
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching repository tree page {page} for project {project_id}, ref {ref}: {e}")
-            break # Exit loop on error
-
-        tree_items = response.json()
-        if not tree_items:
-            logger.info(f"No more tree items found on page {page} for project {project_id}, ref {ref}.")
-            break # No more items
-
-        logger.debug(f"Fetched {len(tree_items)} tree items on page {page}.")
-        for item in tree_items:
-            yield item
-
-        # Check pagination headers
-        next_page_header = response.headers.get('X-Next-Page')
-        if next_page_header and next_page_header.isdigit():
-            page = int(next_page_header)
+        # Get total pages from header
+        total_pages_header = response.headers.get('X-Total-Pages')
+        if total_pages_header and total_pages_header.isdigit():
+            total_pages = int(total_pages_header)
+            logger.info(f"GitLab indicates {total_pages} total pages for tree (project {project_id}, ref {ref}). Fetched page 1 ({len(initial_tree_items)} items).")
         else:
-            logger.info("No next page indicated by GitLab API headers for tree.")
-            break # Last page reached
+            logger.warning(f"Could not determine total pages from X-Total-Pages header for tree (project {project_id}, ref {ref}). Only page 1 fetched.")
+            total_pages = 1
 
-    logger.info(f"Finished fetching repository tree for project {project_id}, ref {ref}.") 
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching initial repository tree page for project {project_id}, ref {ref}: {e}")
+        return [] # Return empty list on initial fetch error
+
+    if not initial_tree_items and total_pages <= 1:
+        logger.info(f"No tree items found on the first page for project {project_id}, ref {ref}.")
+        return []
+
+    # --- Fetch Remaining Pages Concurrently ---
+    if total_pages > 1:
+        logger.info(f"Fetching remaining {total_pages - 1} tree pages concurrently (max_workers={max_workers}) for project {project_id}, ref {ref}...")
+
+        def _fetch_tree_page(page_num: int) -> Optional[List[Dict[str, Any]]]:
+            """Fetches a single page of the repository tree."""
+            page_params = {
+                "ref": ref,
+                "recursive": "true",
+                "per_page": per_page,
+                "page": page_num
+            }
+            try:
+                # logger.debug(f"Fetching tree page {page_num} for project {project_id}, ref {ref}")
+                page_response = requests.get(api_url, headers=headers, params=page_params, timeout=60)
+                page_response.raise_for_status()
+                page_data = page_response.json()
+                # logger.debug(f"Successfully fetched tree page {page_num} ({len(page_data)} items)")
+                return page_data
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error fetching tree page {page_num} for project {project_id}, ref {ref}: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error fetching tree page {page_num} for project {project_id}, ref {ref}: {e}", exc_info=True)
+                return None
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='GitLabTreePageFetch') as executor:
+            future_to_page = {
+                executor.submit(_fetch_tree_page, page): page
+                for page in range(2, total_pages + 1)
+            }
+
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    page_result = future.result()
+                    if page_result is not None:
+                        tree_items.extend(page_result)
+                        logger.info(f"Successfully processed tree page {page_num} ({len(page_result)} items). Current total: {len(tree_items)}")
+                    else:
+                        logger.warning(f"Skipping results for tree page {page_num} due to fetch error (project {project_id}, ref {ref}).")
+                except Exception as exc:
+                    logger.error(f"Tree page {page_num} generated an exception during future processing: {exc}", exc_info=True)
+
+    logger.info(f"Finished fetching repository tree for project {project_id}, ref {ref}. Total items: {len(tree_items)}")
+    return tree_items 

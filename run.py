@@ -26,15 +26,15 @@ def main():
     parser = argparse.ArgumentParser(description="Run a specific worker component of the CodeSearcher application.")
     parser.add_argument(
         "component",
-        choices=["discover_repos", "process_repos"],
+        choices=["discover_repos", "process_repos", "process_files"],
         help="The worker component to run."
     )
-    # Optional argument to control concurrency for process_repos
+    # Optional argument to control concurrency for process_repos and process_files
     parser.add_argument(
         "-n", "--num-processes",
         type=int,
         default=10,
-        help="Number of processes to spawn for 'process_repos' worker (default: 10)"
+        help="Number of processes to spawn for 'process_repos' or 'process_files' worker (default: 10)"
     )
 
     args = parser.parse_args()
@@ -42,11 +42,15 @@ def main():
     component_name = args.component
     num_processes = args.num_processes
 
-    if component_name == "process_repos":
+    if component_name in ["process_repos", "process_files"]:
         logger.info(f"Spawning {num_processes} processes for the '{component_name}' worker...")
         processes = []
         for i in range(num_processes):
-            process = multiprocessing.Process(target=run_worker_process, args=(component_name,), name=f"RepoProcessor-{i}")
+            process = multiprocessing.Process(
+                target=run_worker_process, 
+                args=(component_name,), 
+                name=f"{component_name.title().replace('_', '')}-{i}"
+            )
             processes.append(process)
             process.start()
             logger.info(f"Started process {process.pid} (Name: {process.name})")
